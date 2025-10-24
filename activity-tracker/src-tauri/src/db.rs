@@ -18,8 +18,8 @@ pub struct AggregatedActivity {
     pub duration: i64, // in seconds
 }
 
-pub fn init_db() -> Result<Connection> {
-    let conn = Connection::open("activity.db")?;
+pub fn init_db(db_path: &std::path::Path) -> Result<Connection> {
+    let conn = Connection::open(db_path)?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS activity (
             id INTEGER PRIMARY KEY,
