@@ -1,5 +1,5 @@
 use serde::{Serialize, Deserialize};
-use db::Activity;
+use db::AggregatedActivity;
 use x_win::get_active_window;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,16 +33,51 @@ fn get_active_window_info() -> Result<ActiveWindowInfo, String> {
 }
 
 #[tauri::command]
-fn is_idle(state: tauri::State<Arc<Mutex<SystemTime>>>) -> bool {
+fn is_idle(state: tauri::State<Arc<Mutex<SystemTime>>>, conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> bool {
     let last_activity = *state.lock().unwrap();
     let now = SystemTime::now();
-    now.duration_since(last_activity).unwrap().as_secs() > 300
+    let idle_time = get_idle_time(conn).unwrap_or(300);
+    now.duration_since(last_activity).unwrap().as_secs() > idle_time
 }
 
 #[tauri::command]
-fn get_daily_report(date: String, conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> Result<Vec<Activity>, String> {
+fn get_daily_report(date: String, conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> Result<Vec<AggregatedActivity>, String> {
     let conn = conn.lock().unwrap();
     db::get_daily_report(&conn, &date).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_idle_time(conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> Result<u64, String> {
+    let conn = conn.lock().unwrap();
+    let idle_time_str = db::get_setting(&conn, "idle_time").map_err(|e| e.to_string())?.unwrap_or("300".to_string());
+    idle_time_str.parse::<u64>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_idle_time(idle_time: u64, conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> Result<(), String> {
+    let conn = conn.lock().unwrap();
+    db::set_setting(&conn, "idle_time", &idle_time.to_string()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_ignored_apps(conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> Result<Vec<String>, String> {
+    let conn = conn.lock().unwrap();
+    db::get_ignored_apps(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_ignored_app(app_name: String, conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> Result<(), String> {
+    let conn = conn.lock().unwrap();
+    db::add_ignored_app(&conn, &app_name).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_ignored_app(app_name: String, conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> Result<(), String> {
+    let conn = conn.lock().unwrap();
+    db::remove_ignored_app(&conn, &app_name).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -74,7 +109,8 @@ pub fn run() {
             if let Ok(mut conn) = conn_clone.lock() {
                 if let Ok(last_activity) = last_activity_clone2.lock() {
                     let now = SystemTime::now();
-                    let is_idle = now.duration_since(*last_activity).unwrap_or_default().as_secs() > 300;
+                    let idle_time = db::get_setting(&conn, "idle_time").unwrap().unwrap_or("300".to_string()).parse::<u64>().unwrap();
+                    let is_idle = now.duration_since(*last_activity).unwrap_or_default().as_secs() > idle_time;
                     if let Ok(mut current_activity) = current_activity_clone.lock() {
                         if is_idle {
                             if let Some(mut activity) = current_activity.take() {
@@ -85,6 +121,10 @@ pub fn run() {
                             }
                         } else {
                             if let Ok(info) = get_active_window_info() {
+                                let ignored_apps = db::get_ignored_apps(&conn).unwrap_or_default();
+                                if ignored_apps.contains(&info.app_name) {
+                                    continue;
+                                }
                                 if let Some(activity) = current_activity.as_mut() {
                                     if activity.app_name != info.app_name || activity.window_title != info.title {
                                         let mut activity_to_insert = activity.clone();
@@ -119,7 +159,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, get_active_window_info, is_idle, get_daily_report])
+        .invoke_handler(tauri::generate_handler![greet, get_active_window_info, is_idle, get_daily_report, get_idle_time, set_idle_time, get_ignored_apps, add_ignored_app, remove_ignored_app])
         .manage(conn)
         .manage(last_activity)
         .manage(current_activity)
