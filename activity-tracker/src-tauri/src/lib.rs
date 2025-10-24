@@ -4,8 +4,8 @@ use x_win::get_active_window;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
-use rdev::{listen, Event};
 use chrono::Utc;
+use user_idle::UserIdle;
 
 mod db;
 
@@ -33,11 +33,10 @@ fn get_active_window_info() -> Result<ActiveWindowInfo, String> {
 }
 
 #[tauri::command]
-fn is_idle(state: tauri::State<Arc<Mutex<SystemTime>>>, conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> bool {
-    let last_activity = *state.lock().unwrap();
-    let now = SystemTime::now();
+fn is_idle(conn: tauri::State<Arc<Mutex<rusqlite::Connection>>>) -> bool {
     let idle_time = get_idle_time(conn).unwrap_or(300);
-    now.duration_since(last_activity).unwrap().as_secs() > idle_time
+    let idle = UserIdle::get_time().unwrap().as_seconds();
+    idle > idle_time
 }
 
 #[tauri::command]
@@ -95,63 +94,37 @@ pub fn run() {
 
             let conn = db::init_db(&db_path).expect("Failed to initialize database");
             let conn = Arc::new(Mutex::new(conn));
-            let last_activity = Arc::new(Mutex::new(SystemTime::now()));
             let current_activity: Arc<Mutex<Option<db::Activity>>> = Arc::new(Mutex::new(None));
 
-            let last_activity_clone = last_activity.clone();
-            thread::spawn(move || {
-                let callback = move |_event: Event| {
-                    if let Ok(mut last_activity) = last_activity_clone.lock() {
-                        *last_activity = SystemTime::now();
-                    }
-                };
-
-                if let Err(error) = listen(callback) {
-                    println!("Error: {:?}", error)
-                }
-            });
-
             let conn_clone = conn.clone();
-            let last_activity_clone2 = last_activity.clone();
             let current_activity_clone = current_activity.clone();
             thread::spawn(move || {
                 loop {
                     thread::sleep(Duration::from_secs(1));
                     if let Ok(mut conn) = conn_clone.lock() {
-                        if let Ok(last_activity) = last_activity_clone2.lock() {
-                            let now = SystemTime::now();
-                            let idle_time = db::get_setting(&conn, "idle_time").unwrap().unwrap_or("300".to_string()).parse::<u64>().unwrap();
-                            let is_idle = now.duration_since(*last_activity).unwrap_or_default().as_secs() > idle_time;
-                            if let Ok(mut current_activity) = current_activity_clone.lock() {
-                                if is_idle {
-                                    if let Some(mut activity) = current_activity.take() {
-                                        activity.end_time = Utc::now();
-                                        if let Err(e) = db::insert_activity(&mut conn, &activity) {
-                                            println!("Error inserting activity: {:?}", e);
-                                        }
+                        let idle_time = db::get_setting(&conn, "idle_time").unwrap().unwrap_or("300".to_string()).parse::<u64>().unwrap();
+                        let is_idle = UserIdle::get_time().unwrap().as_seconds() > idle_time;
+                        if let Ok(mut current_activity) = current_activity_clone.lock() {
+                            if is_idle {
+                                if let Some(mut activity) = current_activity.take() {
+                                    activity.end_time = Utc::now();
+                                    if let Err(e) = db::insert_activity(&mut conn, &activity) {
+                                        println!("Error inserting activity: {:?}", e);
                                     }
-                                } else {
-                                    if let Ok(info) = get_active_window_info() {
-                                        let ignored_apps = db::get_ignored_apps(&conn).unwrap_or_default();
-                                        if ignored_apps.contains(&info.app_name) {
-                                            continue;
-                                        }
-                                        if let Some(activity) = current_activity.as_mut() {
-                                            if activity.app_name != info.app_name || activity.window_title != info.title {
-                                                let mut activity_to_insert = activity.clone();
-                                                activity_to_insert.end_time = Utc::now();
-                                                if let Err(e) = db::insert_activity(&mut conn, &activity_to_insert) {
-                                                    println!("Error inserting activity: {:?}", e);
-                                                }
-                                                *current_activity = Some(db::Activity {
-                                                    id: 0,
-                                                    app_name: info.app_name,
-                                                    window_title: info.title,
-                                                    start_time: Utc::now(),
-                                                    end_time: Utc::now(),
-                                                });
+                                }
+                            } else {
+                                if let Ok(info) = get_active_window_info() {
+                                    let ignored_apps = db::get_ignored_apps(&conn).unwrap_or_default();
+                                    if ignored_apps.contains(&info.app_name) {
+                                        continue;
+                                    }
+                                    if let Some(activity) = current_activity.as_mut() {
+                                        if activity.app_name != info.app_name || activity.window_title != info.title {
+                                            let mut activity_to_insert = activity.clone();
+                                            activity_to_insert.end_time = Utc::now();
+                                            if let Err(e) = db::insert_activity(&mut conn, &activity_to_insert) {
+                                                println!("Error inserting activity: {:?}", e);
                                             }
-                                        } else {
                                             *current_activity = Some(db::Activity {
                                                 id: 0,
                                                 app_name: info.app_name,
@@ -160,6 +133,14 @@ pub fn run() {
                                                 end_time: Utc::now(),
                                             });
                                         }
+                                    } else {
+                                        *current_activity = Some(db::Activity {
+                                            id: 0,
+                                            app_name: info.app_name,
+                                            window_title: info.title,
+                                            start_time: Utc::now(),
+                                            end_time: Utc::now(),
+                                        });
                                     }
                                 }
                             }
@@ -169,7 +150,6 @@ pub fn run() {
             });
 
             app.manage(conn);
-            app.manage(last_activity);
             app.manage(current_activity);
 
             Ok(())
