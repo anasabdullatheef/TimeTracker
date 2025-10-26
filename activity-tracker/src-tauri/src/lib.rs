@@ -8,6 +8,9 @@ use chrono::Utc;
 use user_idle::UserIdle;
 
 mod db;
+mod parser;
+#[cfg(target_os = "macos")]
+mod browser;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ActiveWindowInfo {
@@ -118,8 +121,17 @@ pub fn run() {
                                     if ignored_apps.contains(&info.app_name) {
                                         continue;
                                     }
+
+                                    let mut final_title = parser::parse_title(&info.app_name, &info.title);
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        if let Some(url) = browser::get_browser_url(&info.app_name) {
+                                            final_title = url;
+                                        }
+                                    }
+
                                     if let Some(activity) = current_activity.as_mut() {
-                                        if activity.app_name != info.app_name || activity.window_title != info.title {
+                                        if activity.app_name != info.app_name || activity.window_title != final_title {
                                             let mut activity_to_insert = activity.clone();
                                             activity_to_insert.end_time = Utc::now();
                                             if let Err(e) = db::insert_activity(&mut conn, &activity_to_insert) {
@@ -128,7 +140,7 @@ pub fn run() {
                                             *current_activity = Some(db::Activity {
                                                 id: 0,
                                                 app_name: info.app_name,
-                                                window_title: info.title,
+                                                window_title: final_title.clone(),
                                                 start_time: Utc::now(),
                                                 end_time: Utc::now(),
                                             });
@@ -137,7 +149,7 @@ pub fn run() {
                                         *current_activity = Some(db::Activity {
                                             id: 0,
                                             app_name: info.app_name,
-                                            window_title: info.title,
+                                            window_title: final_title.clone(),
                                             start_time: Utc::now(),
                                             end_time: Utc::now(),
                                         });
